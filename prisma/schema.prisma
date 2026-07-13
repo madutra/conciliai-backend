@@ -1,0 +1,194 @@
+// ConciliAI - Schema de dados
+// Banco: MySQL (via DBngin local)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum BatchStatus {
+  UPLOADED
+  PROCESSING
+  MATCHED
+  REVIEWED
+  CLOSED
+}
+
+enum TxStatus {
+  UNMATCHED
+  MATCHED
+  PARTIAL
+}
+
+enum MatchType {
+  EXACT
+  FUZZY_DATE
+  MANY_TO_ONE
+  AI_SEMANTIC
+  MANUAL
+}
+
+enum DivergenceType {
+  MISSING_IN_LEDGER   // está no banco, não está no Protheus
+  MISSING_IN_BANK     // está no Protheus, não está no banco
+  VALUE_MISMATCH      // mesmo evento, valor diferente
+  DUPLICATE           // lançamento duplicado
+}
+
+enum DivergenceStatus {
+  OPEN
+  RESOLVED
+  IGNORED
+}
+
+model BankAccount {
+  id            String   @id @default(cuid())
+  name          String
+  bankCode      String?
+  accountNumber String?
+  createdAt     DateTime @default(now())
+
+  batches ReconciliationBatch[]
+
+  @@map("bank_accounts")
+}
+
+model ReconciliationBatch {
+  id             String      @id @default(cuid())
+  bankAccountId  String
+  bankAccount    BankAccount @relation(fields: [bankAccountId], references: [id])
+  referenceMonth String // "2026-06"
+  status         BatchStatus @default(UPLOADED)
+  bankFileName   String?
+  ledgerFileName String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  bankTransactions BankTransaction[]
+  ledgerEntries    LedgerEntry[]
+  matches          Match[]
+  divergences      Divergence[]
+  agentRuns        AgentRun[]
+
+  @@index([bankAccountId])
+  @@map("reconciliation_batches")
+}
+
+// Lançamentos vindos do extrato bancário (OFX/CSV/PDF)
+model BankTransaction {
+  id              String    @id @default(cuid())
+  batchId         String
+  batch           ReconciliationBatch @relation(fields: [batchId], references: [id])
+  date            DateTime
+  amount          Decimal   @db.Decimal(14, 2)
+  rawDescription  String    @db.VarChar(500)
+  fitId           String?   // identificador único do OFX, se houver
+  status          TxStatus  @default(UNMATCHED)
+  createdAt       DateTime  @default(now())
+
+  matchLinks    MatchBankTransaction[]
+  divergences   Divergence[]
+
+  @@index([batchId, status])
+  @@index([batchId, date, amount])
+  @@map("bank_transactions")
+}
+
+// Lançamentos vindos do ERP (Protheus e outros)
+model LedgerEntry {
+  id             String    @id @default(cuid())
+  batchId        String
+  batch          ReconciliationBatch @relation(fields: [batchId], references: [id])
+  date           DateTime
+  amount         Decimal   @db.Decimal(14, 2)
+  historico      String    @db.VarChar(500)
+  documentNumber String?
+  accountCode    String?
+  status         TxStatus  @default(UNMATCHED)
+  createdAt      DateTime  @default(now())
+
+  matchLinks    MatchLedgerEntry[]
+  divergences   Divergence[]
+
+  @@index([batchId, status])
+  @@index([batchId, date, amount])
+  @@map("ledger_entries")
+}
+
+// Um match pode agrupar N transações bancárias com M lançamentos contábeis
+model Match {
+  id         String    @id @default(cuid())
+  batchId    String
+  batch      ReconciliationBatch @relation(fields: [batchId], references: [id])
+  matchType  MatchType
+  confidence Float     @default(1.0) // 1.0 = exato, <1.0 = fuzzy/IA
+  reasoning  String?   @db.Text // explicação, principalmente quando AI_SEMANTIC
+  createdAt  DateTime  @default(now())
+
+  bankTransactions MatchBankTransaction[]
+  ledgerEntries    MatchLedgerEntry[]
+
+  @@index([batchId])
+  @@map("matches")
+}
+
+model MatchBankTransaction {
+  matchId           String
+  match             Match @relation(fields: [matchId], references: [id])
+  bankTransactionId String
+  bankTransaction   BankTransaction @relation(fields: [bankTransactionId], references: [id])
+
+  @@id([matchId, bankTransactionId])
+  @@map("match_bank_transactions")
+}
+
+model MatchLedgerEntry {
+  matchId       String
+  match         Match @relation(fields: [matchId], references: [id])
+  ledgerEntryId String
+  ledgerEntry   LedgerEntry @relation(fields: [ledgerEntryId], references: [id])
+
+  @@id([matchId, ledgerEntryId])
+  @@map("match_ledger_entries")
+}
+
+// O que sobrou sem match, categorizado (com ou sem apoio de IA)
+model Divergence {
+  id                 String            @id @default(cuid())
+  batchId            String
+  batch              ReconciliationBatch @relation(fields: [batchId], references: [id])
+  type               DivergenceType
+  bankTransactionId  String?
+  bankTransaction    BankTransaction?  @relation(fields: [bankTransactionId], references: [id])
+  ledgerEntryId      String?
+  ledgerEntry        LedgerEntry?      @relation(fields: [ledgerEntryId], references: [id])
+  aiExplanation      String?           @db.Text
+  suggestedCause     String?           @db.VarChar(255)
+  suggestedAccount   String?           @db.VarChar(50)
+  aiConfidence       Float?
+  status             DivergenceStatus  @default(OPEN)
+  createdAt          DateTime          @default(now())
+
+  @@index([batchId, status])
+  @@map("divergences")
+}
+
+// Log de cada chamada de agente de IA (fundamental pra apresentação)
+model AgentRun {
+  id         String   @id @default(cuid())
+  batchId    String
+  batch      ReconciliationBatch @relation(fields: [batchId], references: [id])
+  agentName  String   // "parser-agent" | "investigator-agent"
+  input      String   @db.Text
+  output     String   @db.Text
+  tokensUsed Int?
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  @@index([batchId, agentName])
+  @@map("agent_runs")
+}
