@@ -38,12 +38,22 @@ export class ReconciliationController {
 
   @Patch('divergences/:divergenceId')
   async updateDivergenceStatus(
+    @Param('batchId') batchId: string,
     @Param('divergenceId') divergenceId: string,
     @Body() body: { status: DivergenceStatus },
   ) {
-    return this.prisma.divergence.update({
+    const divergence = await this.prisma.divergence.update({
       where: { id: divergenceId },
       data: { status: body.status },
     });
+
+    // Revisão concluída quando não resta divergência aberta; reaberta volta a MATCHED
+    const openCount = await this.prisma.divergence.count({ where: { batchId, status: 'OPEN' } });
+    await this.prisma.reconciliationBatch.updateMany({
+      where: { id: batchId, status: { in: ['MATCHED', 'REVIEWED'] } },
+      data: { status: openCount === 0 ? 'REVIEWED' : 'MATCHED' },
+    });
+
+    return divergence;
   }
 }
