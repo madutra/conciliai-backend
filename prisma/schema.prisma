@@ -1,12 +1,12 @@
 // ConciliAI - Schema de dados
-// Banco: MySQL (via DBngin local)
+// Banco: PostgreSQL (local via Homebrew; produção via DigitalOcean App Platform Dev Database)
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "mysql"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
