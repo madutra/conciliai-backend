@@ -23,12 +23,13 @@ export class AnthropicClientService {
     toolName: string;
     toolDescription: string;
     inputSchema: Record<string, unknown>;
+    maxTokens?: number; // parser de extrato precisa de mais espaço que o classificador
   }): Promise<{ result: T; tokensUsed: number; durationMs: number }> {
     const start = Date.now();
 
     const response = await this.client.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
+      max_tokens: params.maxTokens ?? 1024,
       system: params.system,
       messages: [{ role: 'user', content: params.prompt }],
       tools: [

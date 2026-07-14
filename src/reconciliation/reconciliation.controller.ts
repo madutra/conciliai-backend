@@ -8,20 +8,40 @@ export class ReconciliationController {
 
   @Get('summary')
   async getSummary(@Param('batchId') batchId: string) {
-    const [bankTotal, bankMatched, ledgerTotal, ledgerMatched, divergences] = await Promise.all([
+    const [
+      bankTotal,
+      bankMatched,
+      financialTotal,
+      financialMatchedVsBank,
+      financialMatchedVsLedger,
+      ledgerTotal,
+      ledgerMatched,
+      divergences,
+    ] = await Promise.all([
       this.prisma.bankTransaction.count({ where: { batchId } }),
       this.prisma.bankTransaction.count({ where: { batchId, status: 'MATCHED' } }),
+      this.prisma.financialEntry.count({ where: { batchId } }),
+      this.prisma.financialEntry.count({ where: { batchId, statusVsBank: 'MATCHED' } }),
+      this.prisma.financialEntry.count({ where: { batchId, statusVsLedger: 'MATCHED' } }),
       this.prisma.ledgerEntry.count({ where: { batchId } }),
       this.prisma.ledgerEntry.count({ where: { batchId, status: 'MATCHED' } }),
       this.prisma.divergence.findMany({
         where: { batchId },
-        include: { bankTransaction: true, ledgerEntry: true },
+        include: { bankTransaction: true, financialEntry: true, ledgerEntry: true },
         orderBy: { createdAt: 'desc' },
       }),
     ]);
 
     return {
+      threeWay: financialTotal > 0,
       bank: { total: bankTotal, matched: bankMatched, pct: bankTotal ? bankMatched / bankTotal : 0 },
+      financial: {
+        total: financialTotal,
+        matchedVsBank: financialMatchedVsBank,
+        matchedVsLedger: financialMatchedVsLedger,
+        pctVsBank: financialTotal ? financialMatchedVsBank / financialTotal : 0,
+        pctVsLedger: financialTotal ? financialMatchedVsLedger / financialTotal : 0,
+      },
       ledger: { total: ledgerTotal, matched: ledgerMatched, pct: ledgerTotal ? ledgerMatched / ledgerTotal : 0 },
       divergences,
     };
@@ -31,7 +51,11 @@ export class ReconciliationController {
   async getMatches(@Param('batchId') batchId: string) {
     return this.prisma.match.findMany({
       where: { batchId },
-      include: { bankTransactions: { include: { bankTransaction: true } }, ledgerEntries: { include: { ledgerEntry: true } } },
+      include: {
+        bankTransactions: { include: { bankTransaction: true } },
+        financialEntries: { include: { financialEntry: true } },
+        ledgerEntries: { include: { ledgerEntry: true } },
+      },
       orderBy: { createdAt: 'desc' },
     });
   }

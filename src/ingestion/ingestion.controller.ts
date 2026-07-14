@@ -20,6 +20,16 @@ export class IngestionController {
     return this.ingestionService.ingestBankFile(batchId, file);
   }
 
+  @Post('financial-statement')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadFinancialStatement(
+    @Param('batchId') batchId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('Arquivo não enviado');
+    return this.ingestionService.ingestFinancialFile(batchId, file);
+  }
+
   @Post('ledger')
   @UseInterceptors(FileInterceptor('file'))
   async uploadLedger(@Param('batchId') batchId: string, @UploadedFile() file: Express.Multer.File) {

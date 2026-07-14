@@ -6,6 +6,15 @@ export interface NormalizedBankRecord {
   amount: number; // positivo = credito, negativo = debito
   rawDescription: string;
   fitId?: string;
+  documentNumber?: string; // tokens extraídos do Dcto./descrição
+}
+
+// Extrato gerado pelo financeiro (SIGAFIN) — terceira ponta da conciliação
+export interface NormalizedFinancialRecord {
+  date: Date;
+  amount: number; // mesma convenção do banco: positivo = entrada
+  description: string;
+  documentNumber?: string;
 }
 
 export interface NormalizedLedgerRecord {
@@ -14,6 +23,7 @@ export interface NormalizedLedgerRecord {
   historico: string;
   documentNumber?: string;
   accountCode?: string;
+  loteDocLinha?: string; // LOTE/SUB/DOC/LINHA do Protheus, quando houver
 }
 
 export interface FileParser<T> {

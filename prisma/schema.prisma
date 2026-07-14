@@ -18,6 +18,24 @@ enum BatchStatus {
   CLOSED
 }
 
+// Natureza contábil da conta. Conta garantida (cheque especial empresarial)
+// é passivo: o saldo bancário vive negativo e isso é esperado, não erro.
+enum AccountNature {
+  ASSET     // conta corrente comum
+  LIABILITY // conta garantida / capital de giro
+}
+
+// A conciliação tem 3 pontas: banco (extrato oficial), financeiro (SIGAFIN)
+// e razão contábil (Protheus). Cada Match/Divergence pertence a uma "perna":
+//   BANK_VS_FINANCIAL  → extrato do banco vs extrato do financeiro
+//   FINANCIAL_VS_LEDGER → extrato do financeiro vs razão contábil
+//   BANK_VS_LEDGER      → fallback 2 pontas (quando não há arquivo do financeiro)
+enum MatchLeg {
+  BANK_VS_FINANCIAL
+  FINANCIAL_VS_LEDGER
+  BANK_VS_LEDGER
+}
+
 enum TxStatus {
   UNMATCHED
   MATCHED
@@ -25,18 +43,21 @@ enum TxStatus {
 }
 
 enum MatchType {
+  DOC_NUMBER      // mesmo número de documento/NF + mesmo valor — chave mais forte
   EXACT
   FUZZY_DATE
   MANY_TO_ONE
+  INTERNAL_OFFSET // par que se anula na MESMA fonte (baixa + cancelamento de baixa)
   AI_SEMANTIC
   MANUAL
 }
 
 enum DivergenceType {
-  MISSING_IN_LEDGER   // está no banco, não está no Protheus
-  MISSING_IN_BANK     // está no Protheus, não está no banco
-  VALUE_MISMATCH      // mesmo evento, valor diferente
-  DUPLICATE           // lançamento duplicado
+  MISSING_IN_LEDGER    // está no banco/financeiro, não está no Protheus
+  MISSING_IN_BANK      // está no Protheus/financeiro, não está no banco
+  MISSING_IN_FINANCIAL // está no banco ou razão, não está no extrato do financeiro
+  VALUE_MISMATCH       // mesmo evento, valor diferente
+  DUPLICATE            // lançamento duplicado
 }
 
 enum DivergenceStatus {
@@ -46,11 +67,12 @@ enum DivergenceStatus {
 }
 
 model BankAccount {
-  id            String   @id @default(cuid())
+  id            String        @id @default(cuid())
   name          String
   bankCode      String?
   accountNumber String?
-  createdAt     DateTime @default(now())
+  nature        AccountNature @default(ASSET)
+  createdAt     DateTime      @default(now())
 
   batches ReconciliationBatch[]
 
@@ -62,13 +84,15 @@ model ReconciliationBatch {
   bankAccountId  String
   bankAccount    BankAccount @relation(fields: [bankAccountId], references: [id])
   referenceMonth String // "2026-06"
-  status         BatchStatus @default(UPLOADED)
-  bankFileName   String?
-  ledgerFileName String?
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
+  status            BatchStatus @default(UPLOADED)
+  bankFileName      String?
+  financialFileName String?
+  ledgerFileName    String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
 
   bankTransactions BankTransaction[]
+  financialEntries FinancialEntry[]
   ledgerEntries    LedgerEntry[]
   matches          Match[]
   divergences      Divergence[]
@@ -87,6 +111,7 @@ model BankTransaction {
   amount          Decimal   @db.Decimal(14, 2)
   rawDescription  String    @db.VarChar(500)
   fitId           String?   // identificador único do OFX, se houver
+  documentNumber  String?   // coluna Dcto. do extrato — chave de match forte
   status          TxStatus  @default(UNMATCHED)
   createdAt       DateTime  @default(now())
 
@@ -96,6 +121,32 @@ model BankTransaction {
   @@index([batchId, status])
   @@index([batchId, date, amount])
   @@map("bank_transactions")
+}
+
+// Lançamentos do extrato gerado pelo FINANCEIRO (SIGAFIN/Protheus).
+// Terceira ponta da conciliação: precisa bater com o banco de um lado
+// e com o razão contábil do outro.
+model FinancialEntry {
+  id             String    @id @default(cuid())
+  batchId        String
+  batch          ReconciliationBatch @relation(fields: [batchId], references: [id])
+  date           DateTime
+  amount         Decimal   @db.Decimal(14, 2)
+  description    String    @db.VarChar(500)
+  documentNumber String?
+  // Uma linha do financeiro participa de duas conciliações independentes:
+  // contra o banco (statusVsBank) e contra o razão (statusVsLedger).
+  statusVsBank   TxStatus  @default(UNMATCHED)
+  statusVsLedger TxStatus  @default(UNMATCHED)
+  createdAt      DateTime  @default(now())
+
+  matchLinks  MatchFinancialEntry[]
+  divergences Divergence[]
+
+  @@index([batchId, statusVsBank])
+  @@index([batchId, statusVsLedger])
+  @@index([batchId, date, amount])
+  @@map("financial_entries")
 }
 
 // Lançamentos vindos do ERP (Protheus e outros)
@@ -108,6 +159,7 @@ model LedgerEntry {
   historico      String    @db.VarChar(500)
   documentNumber String?
   accountCode    String?
+  loteDocLinha   String?   // referência LOTE/SUB/DOC/LINHA do Protheus
   status         TxStatus  @default(UNMATCHED)
   createdAt      DateTime  @default(now())
 
@@ -119,20 +171,23 @@ model LedgerEntry {
   @@map("ledger_entries")
 }
 
-// Um match pode agrupar N transações bancárias com M lançamentos contábeis
+// Um match pode agrupar N lançamentos de um lado com M do outro,
+// sempre dentro de uma perna (leg) da conciliação de 3 pontas.
 model Match {
   id         String    @id @default(cuid())
   batchId    String
   batch      ReconciliationBatch @relation(fields: [batchId], references: [id])
+  leg        MatchLeg  @default(BANK_VS_LEDGER)
   matchType  MatchType
   confidence Float     @default(1.0) // 1.0 = exato, <1.0 = fuzzy/IA
   reasoning  String?   @db.Text // explicação, principalmente quando AI_SEMANTIC
   createdAt  DateTime  @default(now())
 
   bankTransactions MatchBankTransaction[]
+  financialEntries MatchFinancialEntry[]
   ledgerEntries    MatchLedgerEntry[]
 
-  @@index([batchId])
+  @@index([batchId, leg])
   @@map("matches")
 }
 
@@ -144,6 +199,16 @@ model MatchBankTransaction {
 
   @@id([matchId, bankTransactionId])
   @@map("match_bank_transactions")
+}
+
+model MatchFinancialEntry {
+  matchId          String
+  match            Match @relation(fields: [matchId], references: [id])
+  financialEntryId String
+  financialEntry   FinancialEntry @relation(fields: [financialEntryId], references: [id])
+
+  @@id([matchId, financialEntryId])
+  @@map("match_financial_entries")
 }
 
 model MatchLedgerEntry {
@@ -161,9 +226,12 @@ model Divergence {
   id                 String            @id @default(cuid())
   batchId            String
   batch              ReconciliationBatch @relation(fields: [batchId], references: [id])
+  leg                MatchLeg          @default(BANK_VS_LEDGER)
   type               DivergenceType
   bankTransactionId  String?
   bankTransaction    BankTransaction?  @relation(fields: [bankTransactionId], references: [id])
+  financialEntryId   String?
+  financialEntry     FinancialEntry?   @relation(fields: [financialEntryId], references: [id])
   ledgerEntryId      String?
   ledgerEntry        LedgerEntry?      @relation(fields: [ledgerEntryId], references: [id])
   aiExplanation      String?           @db.Text
