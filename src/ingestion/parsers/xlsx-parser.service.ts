@@ -31,15 +31,17 @@ export class XlsxParserService {
 
   parseFinancialXlsx(fileBuffer: Buffer): NormalizedFinancialRecord[] {
     const rows = this.readRows(fileBuffer);
-    const header = this.findHeaderRow(rows, ['DATA', 'ENTRADAS', 'SAIDAS']);
+    // ENTRADAS + SAIDAS bastam pra reconhecer o SIGAFIN: alguns exports não
+    // trazem o rótulo "DATA" (a data fica na 1ª coluna sem cabeçalho).
+    const header = this.findHeaderRow(rows, ['ENTRADAS', 'SAIDAS']);
     if (!header) {
       throw new BadRequestException(
-        'Layout não reconhecido: esperava extrato do financeiro (SIGAFIN) com colunas DATA/ENTRADAS/SAIDAS',
+        'Layout não reconhecido: esperava extrato do financeiro (SIGAFIN) com colunas ENTRADAS/SAIDAS',
       );
     }
 
     const col = {
-      date: this.findColumn(header.row, 'DATA'),
+      date: this.findDateColumn(rows, header),
       operation: this.findColumn(header.row, 'OPERA'),
       document: this.findColumn(header.row, 'DOCUMENTO'),
       in: this.findColumn(header.row, 'ENTRADAS'),
@@ -129,6 +131,22 @@ export class XlsxParserService {
 
   private findColumn(headerRow: Row, label: string): number {
     return headerRow.findIndex((c) => this.normalizeLabel(c).startsWith(label));
+  }
+
+  // Coluna de data: usa o rótulo DATA quando existe; senão (export sem
+  // cabeçalho de data) escolhe a coluna cujas primeiras linhas de dado são
+  // datas de verdade — evita chumbar índice fixo.
+  private findDateColumn(rows: Row[], header: { index: number; row: Row }): number {
+    const labeled = this.findColumn(header.row, 'DATA');
+    if (labeled >= 0) return labeled;
+
+    const dataRows = rows.slice(header.index + 1, header.index + 40);
+    const width = Math.max(0, ...dataRows.map((r) => r.length));
+    for (let c = 0; c < width; c++) {
+      const hits = dataRows.filter((r) => this.parseDate(r[c]) !== null).length;
+      if (hits >= 3) return c;
+    }
+    return 0;
   }
 
   // Células mescladas deslocam o dado pra direita do rótulo: procura o
